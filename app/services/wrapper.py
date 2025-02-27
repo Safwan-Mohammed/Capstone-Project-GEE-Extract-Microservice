@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import ee
 from app.services import border_noise_correction as bnc
 from app.services import speckle_filter as sf
@@ -5,6 +6,53 @@ from app.services import terrain_flattening as trf
 from app.services import helper
 
 def s1_preproc(params):
+=======
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Version: v1.2
+Date: 2021-04-01
+Authors: Mullissa A., Vollrath A., Braun, C., Slagter B., Balling J., Gou Y., Gorelick N.,  Reiche J.
+Description: A wrapper function to derive the Sentinel-1 ARD
+"""
+
+
+import ee
+import border_noise_correction as bnc
+import speckle_filter as sf
+import terrain_flattening as trf
+import helper
+
+ee.Initialize()
+
+
+###########################################
+# DO THE JOB
+###########################################
+
+def s1_preproc(params):
+    """
+    Applies preprocessing to a collection of S1 images to return an analysis ready sentinel-1 data.
+
+    Parameters
+    ----------
+    params : Dictionary
+        These parameters determine the data selection and image processing parameters.
+
+    Raises
+    ------
+    ValueError
+        
+
+    Returns
+    -------
+    ee.ImageCollection
+        A processed Sentinel-1 image collection
+
+    """
+
+
+>>>>>>> b47f197828e6d5d65aed068b150d1d3aa11c5631
     APPLY_BORDER_NOISE_CORRECTION = params['APPLY_BORDER_NOISE_CORRECTION']
     APPLY_TERRAIN_FLATTENING = params['APPLY_TERRAIN_FLATTENING']
     APPLY_SPECKLE_FILTERING = params['APPLY_SPECKLE_FILTERING']
@@ -22,8 +70,17 @@ def s1_preproc(params):
     STOP_DATE = params['STOP_DATE']
     ROI = params['ROI']
     CLIP_TO_ROI = params['CLIP_TO_ROI']
+<<<<<<< HEAD
     # SAVE_ASSET = params['SAVE_ASSET']
     # ASSET_ID = params['ASSET_ID']
+=======
+    SAVE_ASSET = params['SAVE_ASSET']
+    ASSET_ID = params['ASSET_ID']
+
+    ###########################################
+    # 0. CHECK PARAMETERS
+    ###########################################
+>>>>>>> b47f197828e6d5d65aed068b150d1d3aa11c5631
 
     if APPLY_BORDER_NOISE_CORRECTION is None:
         APPLY_BORDER_NOISE_CORRECTION = True
@@ -158,6 +215,7 @@ def s1_preproc(params):
         s1_1 = s1_1.map(lambda image: image.clip(ROI))
         
         
+<<<<<<< HEAD
     # if (SAVE_ASSET): 
             
     #     size = s1_1.size().getInfo()
@@ -180,4 +238,26 @@ def s1_preproc(params):
     #         print('Exporting {} to {}'.format(name, assetId))
     print("Before printing")
     print(s1_1.size())
+=======
+    if (SAVE_ASSET): 
+            
+        size = s1_1.size().getInfo()
+        imlist = s1_1.toList(size)
+        for idx in range(0, size):
+            img = imlist.get(idx)
+            img = ee.Image(img)
+            name = str(img.id().getInfo())
+            #name = str(idx)
+            description = name           
+            assetId = ASSET_ID+'/'+name
+
+            task = ee.batch.Export.image.toAsset(image=img,
+                                                 assetId=assetId,
+                                                 description=description,
+                                                 region=s1_1.geometry(),
+                                                 scale=10,
+                                                 maxPixels=1e13)
+            task.start()
+            print('Exporting {} to {}'.format(name, assetId))
+>>>>>>> b47f197828e6d5d65aed068b150d1d3aa11c5631
     return s1_1

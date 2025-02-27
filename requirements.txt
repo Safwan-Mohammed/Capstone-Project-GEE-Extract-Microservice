@@ -6,6 +6,3 @@ geopandas
 earthengine-api
 requests
 python-multipart
-folium
-geemap
-setuptools
