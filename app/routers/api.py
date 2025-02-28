@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form
 from app.services.geojson_service import process_geojson
-from app.services.gee_service import extract_s1_parameters, extract_s2_parameters
+from app.services.s1_service import extract_s1_parameters
+from app.services.s2_service import extract_s2_parameters
 
 router = APIRouter()
 
