@@ -1,5 +1,6 @@
 import ee
 from datetime import datetime
+import json
 
 def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.Image:
     AOI = geometry
@@ -72,7 +73,7 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
     return s2_sr_median
 
 def generate_tile_grid(image, aoi):
-    PIXEL_SIZE = 2560
+    PIXEL_SIZE = 1280
     region = image.geometry()
     bounds = region.bounds().getInfo()
     bounds = bounds["coordinates"]
@@ -107,51 +108,82 @@ def generate_tile_grid(image, aoi):
     clipped_tiles = tilesInAOI.map(lambda tile: tile.setGeometry(tile.geometry().intersection(aoi)))
     return clipped_tiles
 
-def calculate_indices(image: ee.Image) -> ee.Image:
-    B2 = image.select('B2')
-    B3 = image.select('B3')
-    B4 = image.select('B4')
-    B5 = image.select('B5')
-    B8 = image.select('B8')
-    B11 = image.select('B11')
-
-    NDVI = B8.subtract(B4).divide(B8.add(B4)).rename('NDVI')
-    EVI = image.expression(
-        '2.5 * (NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1)',
-        {'NIR': B8, 'RED': B4, 'BLUE': B2}
+def compute_indices(image):
+    nir = image.select('B8')
+    red = image.select('B4')
+    blue = image.select('B2')
+    green = image.select('B3')
+    rededge = image.select('B5')
+    swir1 = image.select('B11')
+    
+    ndvi = nir.subtract(red).divide(nir.add(red)).rename('NDVI')
+    
+    evi = nir.subtract(red).multiply(2.5).divide(
+        nir.add(red.multiply(6)).subtract(blue.multiply(7.5)).add(1)
     ).rename('EVI')
-    GNDVI = B8.subtract(B3).divide(B8.add(B3)).rename('GNDVI')
-    SAVI = B8.subtract(B4).divide(B8.add(B4).add(0.5)).multiply(1.5).rename('SAVI')
-    NDWI = B3.subtract(B8).divide(B3.add(B8)).rename('NDWI')
-    NDMI = B8.subtract(B11).divide(B8.add(B11)).rename('NDMI')
-    RENDVI = B5.subtract(B4).divide(B5.add(B4)).rename('RENDVI')
+    
+    gndvi = nir.subtract(green).divide(nir.add(green)).rename('GNDVI')
+    
+    L = 0.5
+    savi = nir.subtract(red).divide(nir.add(red).add(L)).multiply(1 + L).rename('SAVI')
+    
+    ndwi = green.subtract(nir).divide(green.add(nir)).rename('NDWI')
+    
+    ndmi = nir.subtract(swir1).divide(nir.add(swir1)).rename('NDMI')
+    
+    rendvi = rededge.subtract(red).divide(rededge.add(red)).rename('RENDVI')
+    
+    return image.addBands([ndvi, evi, gndvi, savi, ndwi, ndmi, rendvi])
 
-    return image.addBands([NDVI, EVI, GNDVI, SAVI, NDWI, NDMI, RENDVI])
-
-def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str) -> dict:
+def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str) -> str:
+    
     s2_median = preprocess_s2(geometry, start_date, end_date)
     grid = generate_tile_grid(s2_median, geometry)
-    print("Success")
-    return grid
+    tiles_list = grid.toList(grid.size())
+    total_tiles = grid.size().getInfo()
+    print(f"Total tiles to process: {total_tiles}")
 
-    # BELOW PART HAS TO BE TESTED
-
-    # s2_with_indices = calculate_indices(s2_median)
+    indices = ['NDVI', 'EVI', 'GNDVI', 'SAVI', 'NDWI', 'NDMI', 'RENDVI']
     
-    # indices_median = s2_with_indices.reduceRegion(
-    #     reducer=ee.Reducer.median(),
-    #     geometry=geometry,
-    #     scale=10,
-    #     maxPixels=1e13
-    # )
+    all_tiles_data = []
 
-    # results = {
-    #     'NDVI': indices_median.get('NDVI').getInfo(),
-    #     'EVI': indices_median.get('EVI').getInfo(),
-    #     'GNDVI': indices_median.get('GNDVI').getInfo(),
-    #     'SAVI': indices_median.get('SAVI').getInfo(),
-    #     'NDWI': indices_median.get('NDWI').getInfo(),
-    #     'NDMI': indices_median.get('NDMI').getInfo(),
-    #     'RENDVI': indices_median.get('RENDVI').getInfo()
-    # }
-    # return results
+    for i in range(total_tiles):
+        tile = ee.Feature(tiles_list.get(i))
+        tile_geometry = tile.geometry()
+        
+        clipped_image = s2_median.clip(tile_geometry)
+        indexed_image = compute_indices(clipped_image)
+        image = indexed_image.reproject(crs='EPSG:4326', scale=10)
+        
+        pixels = image.sampleRectangle(region=tile_geometry, properties=indices, defaultValue=0)
+        pixel_data = pixels.getInfo()
+        
+        ref_index = 'NDVI'
+        grid = pixel_data['properties'][ref_index]
+        grid_height = len(grid)
+        grid_width = len(grid[0])
+        total_pixels = grid_height * grid_width
+        
+        tile_data = {
+            "tile_index": i,
+            "geometry": tile_geometry.getInfo(),
+            "grid_size": {"height": grid_height, "width": grid_width},
+            "indices": {}
+        }
+        
+        for index in indices:
+            print(f"Processing Index: {index}")
+            try:
+                index_values = pixels.get(index).getInfo()
+                if index_values:
+                    flat_values = [val for row in index_values for val in row]
+                    tile_data["indices"][index] = flat_values
+                else:
+                    raise Exception("No Data")
+            except Exception as e:
+                print(f"Error in index {index}: {e}")
+                tile_data["indices"][index] = [None] * total_pixels
+        
+        all_tiles_data.append(tile_data)
+    
+    return json.dumps({"tiles": all_tiles_data})
