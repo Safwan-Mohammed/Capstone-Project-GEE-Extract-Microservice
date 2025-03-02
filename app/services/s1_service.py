@@ -1,57 +1,74 @@
 import ee
-from app.helpers.wrapper import s1_preproc
-from app.helpers.helper import lin_to_db2
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from app.helpers.generate_tile_grid import generate_tile_grid
 
 def extract_s1_parameters(geometry: ee.Geometry, start_date: str, end_date: str) -> dict:
-    s1_median = preprocess_s1(geometry, start_date, end_date)
-    s1_with_vwc = calculate_vwc(s1_median)
-    
-    vwc_median = s1_with_vwc.select('VWC').reduceRegion(
-        reducer=ee.Reducer.median(),
-        geometry=geometry,
-        scale=10,
-        maxPixels=1e13
-    ).get('VWC').getInfo()
 
-    return {'VWC': vwc_median}
+    s1 = ee.ImageCollection('COPERNICUS/S1_GRD_FLOAT').filter(ee.Filter.eq('instrumentMode', 'IW')).filter(ee.Filter.eq('resolution_meters', 10)).filterDate(start_date, end_date).filterBounds(geometry)
 
-def preprocess_s1(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.Image:
-    parameters = {
-        'START_DATE': start_date,
-        'STOP_DATE': end_date,
-        'POLARIZATION': 'VVVH',  
-        'GEOMETRY': geometry,    
-        'ORBIT': 'BOTH',         
-        'APPLY_BORDER_NOISE_CORRECTION': True,
-        'APPLY_SPECKLE_FILTERING': True,
-        'SPECKLE_FILTER_FRAMEWORK': 'MULTI',
-        'SPECKLE_FILTER': 'REFINED LEE',
-        'SPECKLE_FILTER_KERNEL_SIZE': 15,
-        'SPECKLE_FILTER_NR_OF_IMAGES': 10,
-        'APPLY_TERRAIN_FLATTENING': True,
-        'DEM': ee.Image('USGS/SRTMGL1_003'),
-        'TERRAIN_FLATTENING_MODEL': 'VOLUME',
-        'TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER': 0,
-        'FORMAT': 'DB',
-        'CLIP_TO_ROI': True,
-        'SAVE_ASSETS': False
-    }
+    def add_vh_vv_ratio(image):
+        vh_vv_ratio = image.expression('VH / VV', {'VH': image.select('VH'), 'VV': image.select('VV')}).rename('VH_VV_ratio')
+        return image.addBands(vh_vv_ratio)
 
-    parameters['ROI'] = parameters.pop('GEOMETRY')
-    s1_processed = s1_preproc(parameters)
-    print(s1_processed.size())
-    s1_median = s1_processed.median()
-    s1_with_ratio = s1_median.addBands(
-        s1_median.expression('VH / VV', {'VH': s1_median.select('VH'), 'VV': s1_median.select('VV')}).rename('VH_VV_ratio')
-    )
-    s1_final = lin_to_db2(s1_with_ratio)
-    print("Finished processing S1")
-    return s1_final.clip(geometry)
+    def convert_to_db(image):
+        vh_db = image.select('VH').log10().multiply(10).rename('VH_dB')
+        vv_db = image.select('VV').log10().multiply(10).rename('VV_dB')
+        vh_vv_db = image.select('VH_VV_ratio').log10().multiply(10).rename('VH_VV_dB')
+        
+        return image.addBands([vh_db, vv_db, vh_vv_db])
 
-def calculate_vwc(image: ee.Image) -> ee.Image:
-    A = 0.12
-    B = 0.04
-    Omega = 0.3
-    VV = image.select('VV')
-    VWC = VV.subtract(A).divide(B).multiply(Omega).rename('VWC')
-    return image.addBands(VWC)
+    s1_with_ratio = s1.map(add_vh_vv_ratio)
+    s1_median = s1_with_ratio.median().clip(geometry)
+    s1_median_db = convert_to_db(s1_median)
+
+    grid = generate_tile_grid(s1_median_db, geometry)
+    tiles_list = grid.toList(grid.size())
+    indices = ['VH_dB', 'VV_dB', 'VH_VV_dB']
+
+    def process_tile(tile_idx, tile, indices):
+        tile_geometry = tile.geometry()
+        clipped_image = s1_median_db.clip(tile_geometry)
+        image = clipped_image.reproject(crs='EPSG:4326', scale=10)
+        
+        pixels = image.sampleRectangle(region=tile_geometry, properties=indices, defaultValue=0)
+        pixel_data = pixels.getInfo()
+
+        ref_index = 'VV_dB'
+        grid = pixel_data['properties'][ref_index]
+        grid_height = len(grid)
+        grid_width = len(grid[0])
+        total_pixels = grid_height * grid_width
+        
+        tile_data = {
+            "tile_index": tile_idx,
+            "geometry": tile_geometry.getInfo(),
+            "grid_size": {"height": grid_height, "width": grid_width},
+            "indices": {}
+        }
+        
+        for index in indices:
+            index_values = pixel_data['properties'][index]
+            if index_values:
+                flat_values = [val for row in index_values for val in row]
+                tile_data["indices"][index] = flat_values
+            else:
+                tile_data["indices"][index] = [None] * total_pixels
+        
+        return tile_data
+
+    total_tiles = tiles_list.size().getInfo()
+    all_tiles_data = []
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_tile = {
+            executor.submit(process_tile, i, ee.Feature(tiles_list.get(i)), indices): i
+            for i in range(total_tiles)
+        }
+        
+        tile_results = [None] * total_tiles
+        for future in as_completed(future_to_tile):
+            tile_idx = future_to_tile[future]
+            tile_results[tile_idx] = future.result()
+        all_tiles_data.extend(tile_results)
+
+    return {"tiles": all_tiles_data}

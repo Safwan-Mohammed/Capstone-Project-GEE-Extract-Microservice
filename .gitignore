@@ -3,3 +3,4 @@ app/config/gee-key.json
 app/__pycache__
 app/services/__pycache__/
 app/services/s2.py
+app/services/s1.py
