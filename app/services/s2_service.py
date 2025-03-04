@@ -199,7 +199,7 @@ def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
             all_tiles_data.extend(tile_results)
 
         print(f"Processed {len(all_tiles_data)} tiles")
-        return {"tiles": all_tiles_data}
+        return {"s2-tiles": all_tiles_data}
     except Exception as e:
         print(f"Error in extract_s2_parameters: {e}")
         raise Exception(f"Internal Server Error: {e}")  
