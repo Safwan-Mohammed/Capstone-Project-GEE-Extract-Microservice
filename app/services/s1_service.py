@@ -71,4 +71,4 @@ def extract_s1_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
             tile_results[tile_idx] = future.result()
         all_tiles_data.extend(tile_results)
 
-    return {"tiles": all_tiles_data}
+    return {"s1-tiles": all_tiles_data}
