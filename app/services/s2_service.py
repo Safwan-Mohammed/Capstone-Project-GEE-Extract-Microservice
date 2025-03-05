@@ -145,7 +145,6 @@ def process_tile(tile_idx, tile, s2_median_with_indices, indices):
         }
         
         for index in indices:
-            print(f"Processing Index: {index} for tile {tile_idx}")
             index_values = pixel_data['properties'][index]
             if index_values:
                 flat_values = [val for row in index_values for val in row]
@@ -153,7 +152,6 @@ def process_tile(tile_idx, tile, s2_median_with_indices, indices):
             else:
                 raise Exception(f"No data for index {index}")
         
-        print(f"Tile {tile_idx} processed successfully")
         return tile_data
     except Exception as e:
         raise Exception(f"Error processing tile {tile_idx}: {e}")
@@ -161,12 +159,10 @@ def process_tile(tile_idx, tile, s2_median_with_indices, indices):
 def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str) -> str:
     """Endpoint to extract Sentinel-2 indices for all tiles using 4 processes and return as JSON."""
     try:
-        print("Starting preprocessing of Sentinel-2 data")
         s2_median = preprocess_s2(geometry, start_date, end_date)
         if s2_median is None:
             raise Exception("Failed to preprocess Sentinel-2 data")
 
-        print("Computing indices for the entire AOI")
         s2_median_with_indices = compute_indices(s2_median)
         if s2_median_with_indices is None:
             raise Exception("Failed to compute indices")
@@ -175,13 +171,11 @@ def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
         tiles_list = grid.toList(grid.size())
         total_tiles = grid.size().getInfo()
         tiles_to_process = total_tiles 
-        print(f"Total tiles in grid: {total_tiles}, processing {tiles_to_process} tiles")
 
         indices = ['NDVI', 'EVI', 'GNDVI', 'SAVI', 'NDWI', 'NDMI', 'RENDVI']
         all_tiles_data = []
 
         max_workers = 4 
-        print(f"Starting parallel processing with {max_workers} workers")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_tile = {
                 executor.submit(process_tile, i, ee.Feature(tiles_list.get(i)), s2_median_with_indices, indices): i
@@ -198,7 +192,6 @@ def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
             
             all_tiles_data.extend(tile_results)
 
-        print(f"Processed {len(all_tiles_data)} tiles")
         return {"s2-tiles": all_tiles_data}
     except Exception as e:
         print(f"Error in extract_s2_parameters: {e}")
