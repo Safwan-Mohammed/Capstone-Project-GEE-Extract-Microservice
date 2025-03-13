@@ -23,9 +23,8 @@ with open(os.path.join(BASE_DIR, "..", "config", "Tumkur.geojson")) as f:
     geojson_data = json.load(f)
     feature = ee.Feature(geojson_data)
     geojson = ee.FeatureCollection([feature])
-    # region = geojson.geometry().bounds()
 
-def preprocess_s2_collection_for_date(date):
+def preprocess_s2_collection_for_date(date, region):
 
     def get_cloud_parameters(date):
         try:
@@ -85,7 +84,6 @@ def preprocess_s2_collection_for_date(date):
         except Exception as e:
             raise Exception(f"Error in apply_cld_shdw_mask for {date}: {e}")
 
-    # Filter Sentinel-2 collections for the specific date (±1 day to allow for closest image)
     date_ee = ee.Date(date)
     start_date = date_ee.advance(-2, "day")
     end_date = date_ee.advance(3, "day")
@@ -94,12 +92,12 @@ def preprocess_s2_collection_for_date(date):
                  .filterDate(start_date, end_date)
                  .select(["B2", "B3", "B4", "B5", "B8", "B11", "B12", "SCL"])
                  .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", CLOUD_FILTER))
-                #  .filterBounds(region)
+                 .filterBounds(region)
                  )
 
     s2_cloudless_col = (ee.ImageCollection("COPERNICUS/S2_CLOUD_PROBABILITY")
                         .filterDate(start_date, end_date)
-                        # .filterBounds(region)
+                        .filterBounds(region)
                         )
 
     s2_sr_cld_col = ee.ImageCollection(ee.Join.saveFirst("s2cloudless").apply(**{
@@ -111,27 +109,28 @@ def preprocess_s2_collection_for_date(date):
     return s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
 
 def compute_indices(image):
+    try:
+        nir = image.select("B8")
+        red = image.select("B4")
+        blue = image.select("B2")
+        green = image.select("B3")
+        rededge = image.select("B5")
+        swir1 = image.select("B11")
 
-    nir = image.select("B8")
-    red = image.select("B4")
-    blue = image.select("B2")
-    green = image.select("B3")
-    rededge = image.select("B5")
-    swir1 = image.select("B11")
+        ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
+        evi = nir.subtract(red).multiply(2.5).divide(nir.add(red.multiply(6)).subtract(blue.multiply(7.5)).add(1)).rename("EVI")
+        gndvi = nir.subtract(green).divide(nir.add(green)).rename("GNDVI")
+        savi = nir.subtract(red).multiply(1.5).divide(nir.add(red).add(0.5)).rename("SAVI")
+        ndwi = green.subtract(nir).divide(green.add(nir)).rename("NDWI")
+        ndmi = nir.subtract(swir1).divide(nir.add(swir1)).rename("NDMI")
+        rendvi = rededge.subtract(red).divide(rededge.add(red)).rename("RENDVI")
 
-    ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
-    evi = nir.subtract(red).multiply(2.5).divide(nir.add(red.multiply(6)).subtract(blue.multiply(7.5)).add(1)).rename("EVI")
-    gndvi = nir.subtract(green).divide(nir.add(green)).rename("GNDVI")
-    savi = nir.subtract(red).multiply(1.5).divide(nir.add(red).add(0.5)).rename("SAVI")
-    ndwi = green.subtract(nir).divide(green.add(nir)).rename("NDWI")
-    ndmi = nir.subtract(swir1).divide(nir.add(swir1)).rename("NDMI")
-    rendvi = rededge.subtract(red).divide(rededge.add(red)).rename("RENDVI")
-
-    return image.addBands([ndvi, evi, gndvi, savi, ndwi, ndmi, rendvi])
+        return image.addBands([ndvi, evi, gndvi, savi, ndwi, ndmi, rendvi])
+    except Exception as e:
+        print(f"str{e}")
 
 def extract_s1_parameters(points_list):
 
-    # Group points by date
     points_by_date = defaultdict(list)
     for p in points_list:
         points_by_date[p["date"]].append(p["coords"])
@@ -139,22 +138,18 @@ def extract_s1_parameters(points_list):
     s1_results = []
     for date, coords_list in points_by_date.items():
         date_ee = ee.Date(date)
-
-        # Filter Sentinel-1 collection for the specific date
+        region = ee.Geometry.Point(coords_list[0])
         s1_col = (ee.ImageCollection("COPERNICUS/S1_GRD_FLOAT")
                   .filter(ee.Filter.eq("instrumentMode", "IW"))
                   .filter(ee.Filter.eq("resolution_meters", 10))
                   .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))  # Ensure VV exists
                   .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))  # Ensure VH exists
                   .filterDate(date_ee.advance(-6, "day"), date_ee.advance(6, "day"))
-                #   .filterBounds(region)
+                  .filterBounds(region)
                   )
-        # print("s1_col.size().getInfo()", s1_col.size().getInfo())
-        s1_img = s1_col.first()
-        # print("s1_img.bandNames().getInfo()", s1_img.bandNames().getInfo())
+        s1_img = s1_col.median()
         if s1_img:
             try:
-                # print(s1_img)
                 vh_vv_ratio = s1_img.expression("VH / VV", {"VH": s1_img.select("VH"), "VV": s1_img.select("VV")}).rename("VH_VV_ratio")
                 s1_img = s1_img.addBands(vh_vv_ratio)
                 vh_db = s1_img.select("VH").log10().multiply(10).rename("VH_dB")
@@ -164,14 +159,7 @@ def extract_s1_parameters(points_list):
 
                 features = [ee.Feature(ee.Geometry.Point(coords), {"date": date}) for coords in coords_list]
                 feature_collection = ee.FeatureCollection(features)
-                print("Feature collection (S1):", feature_collection.getInfo())
-                print(s1_img.reduceRegion(
-                        reducer=ee.Reducer.mean(),
-                        geometry=feature_collection.geometry(),
-                        scale=30  # Adjust if needed
-                    ).getInfo())
-                s1_values = s1_img.sampleRegions(collection=feature_collection, scale=10, projection="EPSG:4326").getInfo()
-                print("s1_values", s1_values)
+                s1_values = s1_img.sampleRegions(collection=feature_collection, scale=10, projection="EPSG:4326", geometries = True).getInfo()
 
                 # Store results
                 for feature in s1_values["features"]:
@@ -189,31 +177,25 @@ def extract_s1_parameters(points_list):
             except ee.EEException as e:
                 print(f"Error processing Sentinel-1 for {date}: {str(e)}")
                 continue
-    print("s1_results", s1_results)
     return s1_results
 
 def extract_s2_parameters(points_list):
 
-    # Group points by date
     points_by_date = defaultdict(list)
     for p in points_list:
         points_by_date[p["date"]].append(p["coords"])
 
     s2_results = []
     for date, coords_list in points_by_date.items():
-        # Preprocess Sentinel-2 for the specific date
-        s2_col = preprocess_s2_collection_for_date(date)
-        # print("s2_col.size().getInfo()", s2_col.size().getInfo())
-        s2_img = s2_col.first()
-        # print("s2_img.bandNames().getInfo()", s2_img.bandNames().getInfo())
+        region = ee.Geometry.Point(coords_list[0])
+        s2_col = preprocess_s2_collection_for_date(date, region)
+        s2_img = s2_col.median()
         if s2_img:
             try:
                 s2_img = compute_indices(s2_img)
                 features = [ee.Feature(ee.Geometry.Point(coords), {"date": date}) for coords in coords_list]
                 feature_collection = ee.FeatureCollection(features)
-                print("Feature collection (S2):", feature_collection.getInfo())
-                s2_values = s2_img.sampleRegions(collection=feature_collection, scale=10, projection="EPSG:4326").getInfo()
-                print("s2_values", s2_values)
+                s2_values = s2_img.sampleRegions(collection=feature_collection, scale=10, projection="EPSG:4326", geometries = True).getInfo()
                 for feature in s2_values["features"]:
                     props = feature["properties"]
                     s2_results.append({
@@ -230,23 +212,19 @@ def extract_s2_parameters(points_list):
                             "RENDVI": props.get("RENDVI"),
                         }
                     })
-            except ee.EEException as e:
+            except Exception as e:
                 print(f"Error processing Sentinel-2 for {date}: {str(e)}")
                 continue
-    print("s2_results", s2_results)
     return s2_results
 
 def combine_s1_s2_parameters(s1_results, s2_results):
 
     combined_results = []
 
-    # Create a dictionary to index S1 results by (longitude, latitude, date)
     s1_dict = {(r["longitude"], r["latitude"], r["date"]): r for r in s1_results}
 
-    # Create a dictionary to index S2 results by (longitude, latitude, date)
     s2_dict = {(r["longitude"], r["latitude"], r["date"]): r for r in s2_results}
 
-    # Get all unique keys (combinations of longitude, latitude, date)
     all_keys = set(s1_dict.keys()).union(set(s2_dict.keys()))
 
     for key in all_keys:
@@ -265,7 +243,6 @@ def combine_s1_s2_parameters(s1_results, s2_results):
     return combined_results
 
 points_list = [
-    {"coords": [-122.4194, 37.7749], "date": "2025-01-05"},  # San Francisco, CA, USA
     {"coords": [-87.6298, 41.8781], "date": "2025-01-10"},   # Chicago, IL, USA
     {"coords": [2.3522, 48.8566], "date": "2025-01-15"},    # Paris, France
     {"coords": [13.4050, 52.5200], "date": "2025-01-20"},   # Berlin, Germany
@@ -278,9 +255,6 @@ points_list = [
 s1_results = extract_s1_parameters(points_list)
 s2_results = extract_s2_parameters(points_list)
 
-print(s1_results)
-print(s2_results)
-
 combined_results = combine_s1_s2_parameters(s1_results, s2_results)
 
 df = pd.DataFrame([
@@ -288,9 +262,9 @@ df = pd.DataFrame([
         "Longitude": item["longitude"],
         "Latitude": item["latitude"],
         "Date": item["date"],
-        "Pol1_dB": item["s1_values"]["Pol1_dB"] if item["s1_values"] else None,
-        "Pol2_dB": item["s1_values"]["Pol2_dB"] if item["s1_values"] else None,
-        "Pol2_Pol1_dB": item["s1_values"]["Pol2_Pol1_dB"] if item["s1_values"] else None,
+        "VV_dB": item["s1_values"]["VV_dB"] if item["s1_values"] else None,
+        "VH_dB": item["s1_values"]["VH_dB"] if item["s1_values"] else None,
+        "VH_VV_dB": item["s1_values"]["VH_VV_dB"] if item["s1_values"] else None,
         "NDVI": item["s2_values"]["NDVI"] if item["s2_values"] else None,
         "EVI": item["s2_values"]["EVI"] if item["s2_values"] else None,
         "GNDVI": item["s2_values"]["GNDVI"] if item["s2_values"] else None,
@@ -301,7 +275,7 @@ df = pd.DataFrame([
     }
     for item in combined_results
 ])
-print(df)
+
 csv_filename = os.path.join(BASE_DIR ,"sentinel_data.csv")
 df.to_csv(csv_filename, index=False)
 print(f"Results exported to {csv_filename}")
