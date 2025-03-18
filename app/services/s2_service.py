@@ -1,6 +1,4 @@
 import ee
-from datetime import datetime
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.helpers.generate_tile_grid import generate_tile_grid
 
@@ -9,20 +7,7 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
     START_DATE = start_date  
     END_DATE = end_date    
 
-    def get_cloud_parameters(start_date):
-        try:
-            month = datetime.strptime(start_date, "%Y-%m-%d").month
-            if 7 <= month <= 9:
-                return 80, 50, 0.15, 1, 50
-            else:
-                return 40, 40, 0.15, 1, 100
-        except Exception as e:
-            raise Exception(f"Failed to parse start_date in get_cloud_parameters: {e}")
-
-    try:
-        CLOUD_FILTER, CLD_PRB_THRESH, NIR_DRK_THRESH, CLD_PRJ_DIST, BUFFER = get_cloud_parameters(START_DATE)
-    except Exception as e:
-        raise Exception(f"Error setting cloud parameters: {e}")
+    CLOUD_FILTER, CLD_PRB_THRESH, NIR_DRK_THRESH, CLD_PRJ_DIST, BUFFER = 70, 70, 0.15, 1, 40
 
     def add_cloud_bands(img):
         try:
