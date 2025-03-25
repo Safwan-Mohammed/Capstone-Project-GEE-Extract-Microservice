@@ -51,6 +51,15 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
             return img.select(['B2', 'B3', 'B4', 'B5', 'B8', 'B11', 'B12']).updateMask(not_cld_shdw)
         except Exception as e:
             raise Exception(f"Error in apply_cld_shdw_mask: {e}")
+        
+    #To remove non vegetative areas 
+    def vegetation_mask_scl(img): 
+        try:
+            scl = img.select('SCL')
+            vegetated = scl.eq(4)
+            return img.updateMask(vegetated)
+        except Exception as e:
+            raise Exception(f"Error in applying vegetation mask: {e}")
 
     def get_s2_sr_cld_col(aoi, start_date, end_date):
         try:
@@ -79,7 +88,8 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
         s2_sr_cld_col = get_s2_sr_cld_col(AOI, START_DATE, END_DATE)
         if s2_sr_cld_col is None:
             raise Exception("Failed to retrieve Sentinel-2 collection")
-        s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
+        # s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
+        s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask).map(vegetation_mask_scl)
         s2_sr_median = s2_sr_clean.median().clip(AOI)
         return s2_sr_median
     except Exception as e:
