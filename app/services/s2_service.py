@@ -88,8 +88,8 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
         s2_sr_cld_col = get_s2_sr_cld_col(AOI, START_DATE, END_DATE)
         if s2_sr_cld_col is None:
             raise Exception("Failed to retrieve Sentinel-2 collection")
-        # s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
-        s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask).map(vegetation_mask_scl)
+        s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
+        # s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask).map(vegetation_mask_scl)
         s2_sr_median = s2_sr_clean.median().clip(AOI)
         return s2_sr_median
     except Exception as e:
@@ -122,32 +122,25 @@ def process_tile(tile_idx, tile, s2_median_with_indices, indices):
     try:
         tile_geometry = tile.geometry()
         clipped_image = s2_median_with_indices.clip(tile_geometry)
-        image = clipped_image.reproject(crs='EPSG:4326', scale=10)
-        
-        pixels = image.sampleRectangle(region=tile_geometry, properties=indices, defaultValue=0)
-        pixel_data = pixels.getInfo()
-        
-        ref_index = 'NDVI'
-        grid = pixel_data['properties'][ref_index]
-        grid_height = len(grid)
-        grid_width = len(grid[0])
-        
-        tile_data = {
-            "tile_index": tile_idx,
-            "geometry": tile_geometry.getInfo(),
-            "grid_size": {"height": grid_height, "width": grid_width},
-            "indices": {}
-        }
-        
-        for index in indices:
-            index_values = pixel_data['properties'][index]
-            if index_values:
-                flat_values = [val for row in index_values for val in row]
-                tile_data["indices"][index] = flat_values
-            else:
-                raise Exception(f"No data for index {index}")
-        
-        return tile_data
+        # Sample actual pixel values within this tile at 10m resolution, include geometries for coordinates
+        samples = clipped_image.sample(
+            region=tile_geometry,
+            scale=10,
+            geometries=True,
+            numPixels=3000,
+        ).getInfo()
+
+        pixel_dict = {}
+
+        for feat in samples['features']:
+            props = feat['properties']
+            coords = feat['geometry']['coordinates']  # [lon, lat]
+            coord_key = f'{coords[0]},{coords[1]}'  # Convert list to tuple for dict key
+
+            pixel_dict[coord_key] = {index: props.get(index) for index in indices}
+
+        return pixel_dict
+
     except Exception as e:
         raise Exception(f"Error processing tile {tile_idx}: {e}")
 
@@ -168,7 +161,7 @@ def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
         tiles_to_process = total_tiles 
 
         indices = ['NDVI', 'EVI', 'GNDVI', 'SAVI', 'NDWI', 'NDMI', 'RENDVI']
-        all_tiles_data = []
+        all_tiles_data = {}
 
         max_workers = 4 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -181,13 +174,12 @@ def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
             for future in as_completed(future_to_tile):
                 tile_idx = future_to_tile[future]
                 try:
-                    tile_results[tile_idx] = future.result()
+                    tile_data = future.result()
+                    all_tiles_data.update(tile_data)
                 except Exception as e:
                     raise Exception(f"Tile {tile_idx} processing failed: {e}")
-            
-            all_tiles_data.extend(tile_results)
 
-        return {"s2-tiles": all_tiles_data}
+        return all_tiles_data
     except Exception as e:
         print(f"Error in extract_s2_parameters: {e}")
         raise Exception(f"Internal Server Error: {e}")  
