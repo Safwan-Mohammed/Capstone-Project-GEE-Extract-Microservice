@@ -2,7 +2,7 @@ from fastapi import APIRouter, Body
 from app.services.s1_service import extract_s1_parameters
 from app.services.s2_service import extract_s2_parameters
 import asyncio
-import ee, random
+import ee, random, json
 
 router = APIRouter()
 
@@ -13,7 +13,7 @@ async def extract_s1_parameters_endpoint(
     end_date: str = Body(..., description="End date in YYYY-MM-DD format")
 ):
     geometry = geojson.get('geometry')
-    results = await asyncio.to_thread(extract_s1_parameters, geometry, start_date, end_date)    
+    results = await asyncio.to_thread(extract_s1_parameters, geometry, start_date, end_date)
     return results
 
 @router.post("/extract-s2-parameters")

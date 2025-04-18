@@ -1,4 +1,5 @@
 import ee
+import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.helpers.generate_tile_grid import generate_tile_grid
 
@@ -52,15 +53,6 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
         except Exception as e:
             raise Exception(f"Error in apply_cld_shdw_mask: {e}")
         
-    #To remove non vegetative areas 
-    def vegetation_mask_scl(img): 
-        try:
-            scl = img.select('SCL')
-            vegetated = scl.eq(4)
-            return img.updateMask(vegetated)
-        except Exception as e:
-            raise Exception(f"Error in applying vegetation mask: {e}")
-
     def get_s2_sr_cld_col(aoi, start_date, end_date):
         try:
             s2_sr_col = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
@@ -89,7 +81,6 @@ def preprocess_s2(geometry: ee.Geometry, start_date: str, end_date: str) -> ee.I
         if s2_sr_cld_col is None:
             raise Exception("Failed to retrieve Sentinel-2 collection")
         s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
-        # s2_sr_clean = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask).map(vegetation_mask_scl)
         s2_sr_median = s2_sr_clean.median().clip(AOI)
         return s2_sr_median
     except Exception as e:
@@ -118,11 +109,10 @@ def compute_indices(image):
     except Exception as e:
         raise Exception(f"Error in compute_indices: {e}")
 
-def process_tile(tile_idx, tile, s2_median_with_indices, indices):
+def process_tile(tile_idx, tile, s2_median_with_indices, indices, month_name):
     try:
         tile_geometry = tile.geometry()
         clipped_image = s2_median_with_indices.clip(tile_geometry)
-        # Sample actual pixel values within this tile at 10m resolution, include geometries for coordinates
         samples = clipped_image.sample(
             region=tile_geometry,
             scale=10,
@@ -131,23 +121,37 @@ def process_tile(tile_idx, tile, s2_median_with_indices, indices):
         ).getInfo()
 
         pixel_dict = {}
-
         for feat in samples['features']:
             props = feat['properties']
-            coords = feat['geometry']['coordinates']  # [lon, lat]
-            coord_key = f'{coords[0]},{coords[1]}'  # Convert list to tuple for dict key
-
-            pixel_dict[coord_key] = {index: props.get(index) for index in indices}
-
+            coords = feat['geometry']['coordinates']
+            coord_key = f'{coords[0]},{coords[1]}'
+            if coord_key not in pixel_dict:
+                pixel_dict[coord_key] = {}
+            pixel_dict[coord_key][month_name] = {index: props.get(index, 0) for index in indices}
         return pixel_dict
-
     except Exception as e:
         raise Exception(f"Error processing tile {tile_idx}: {e}")
 
-def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str) -> str:
-    """Endpoint to extract Sentinel-2 indices for all tiles using 4 processes and return as JSON."""
+def get_monthly_ranges(start: str, end: str):
+    start_dt = datetime.datetime.strptime(start, "%Y-%m-%d")
+    end_dt = datetime.datetime.strptime(end, "%Y-%m-%d")
+    months = []
+    while start_dt <= end_dt:
+        month_start = start_dt.replace(day=1)
+        if start_dt.month == 12:
+            month_end = start_dt.replace(year=start_dt.year + 1, month=1, day=1)
+        else:
+            month_end = start_dt.replace(month=start_dt.month + 1, day=1)
+        months.append((month_start.strftime("%Y-%m-%d"), month_end.strftime("%Y-%m-%d"), month_start.strftime("%B")))
+        start_dt = month_end
+    return months
+
+def process_month(geometry, month_start, month_end, month_name):
+    indices = ['NDVI', 'EVI', 'GNDVI', 'SAVI', 'NDWI', 'NDMI', 'RENDVI']
+    all_tiles_data = {}
+    
     try:
-        s2_median = preprocess_s2(geometry, start_date, end_date)
+        s2_median = preprocess_s2(geometry, month_start, month_end)
         if s2_median is None:
             raise Exception("Failed to preprocess Sentinel-2 data")
 
@@ -160,26 +164,82 @@ def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str)
         total_tiles = grid.size().getInfo()
         tiles_to_process = total_tiles 
 
-        indices = ['NDVI', 'EVI', 'GNDVI', 'SAVI', 'NDWI', 'NDMI', 'RENDVI']
-        all_tiles_data = {}
-
-        max_workers = 4 
+        max_workers = 4
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_tile = {
-                executor.submit(process_tile, i, ee.Feature(tiles_list.get(i)), s2_median_with_indices, indices): i
+                executor.submit(process_tile, i, ee.Feature(tiles_list.get(i)), s2_median_with_indices, indices, month_name): i
                 for i in range(tiles_to_process)
             }
             
-            tile_results = [None] * tiles_to_process
             for future in as_completed(future_to_tile):
                 tile_idx = future_to_tile[future]
                 try:
                     tile_data = future.result()
                     all_tiles_data.update(tile_data)
                 except Exception as e:
-                    raise Exception(f"Tile {tile_idx} processing failed: {e}")
+                    print(f"Tile {tile_idx} processing failed: {e}")
+                    # If tile processing fails, populate with zeros for all coordinates in the tile
+                    tile = ee.Feature(tiles_list.get(tile_idx))
+                    tile_geometry = tile.geometry()
+                    samples = s2_median_with_indices.sample(
+                        region=tile_geometry,
+                        scale=10,
+                        geometries=True,
+                        numPixels=3000,
+                    ).getInfo()
+                    for feat in samples['features']:
+                        coords = feat['geometry']['coordinates']
+                        coord_key = f'{coords[0]},{coords[1]}'
+                        if coord_key not in all_tiles_data:
+                            all_tiles_data[coord_key] = {}
+                        all_tiles_data[coord_key][month_name] = {index: 0 for index in indices}
 
-        return all_tiles_data
+        # Check if any coordinates are missing data for this month
+        if not all_tiles_data:
+            # If no data is available for the entire month, populate all coordinates with zeros
+            samples = s2_median_with_indices.sample(
+                region=geometry,
+                scale=10,
+                geometries=True,
+                numPixels=3000 * tiles_to_process,
+            ).getInfo()
+            for feat in samples['features']:
+                coords = feat['geometry']['coordinates']
+                coord_key = f'{coords[0]},{coords[1]}'
+                if coord_key not in all_tiles_data:
+                    all_tiles_data[coord_key] = {}
+                all_tiles_data[coord_key][month_name] = {index: 0 for index in indices}
+
+    except Exception as e:
+        # If the entire month fails, populate all coordinates with zeros
+        samples = ee.Image().sample(
+            region=geometry,
+            scale=10,
+            geometries=True,
+            numPixels=3000 * 10,  # Arbitrary large number to cover the area
+        ).getInfo()
+        for feat in samples['features']:
+            coords = feat['geometry']['coordinates']
+            coord_key = f'{coords[0]},{coords[1]}'
+            if coord_key not in all_tiles_data:
+                all_tiles_data[coord_key] = {}
+            all_tiles_data[coord_key][month_name] = {index: 0 for index in indices}
+
+    return all_tiles_data
+
+def extract_s2_parameters(geometry: ee.Geometry, start_date: str, end_date: str) -> dict:
+    """Endpoint to extract Sentinel-2 indices for all tiles using 4 processes and return as JSON."""
+    try:
+        all_data = {}
+        for month_start, month_end, month_name in get_monthly_ranges(start_date, end_date):
+            month_data = process_month(geometry, month_start, month_end, month_name)
+            for coord, data in month_data.items():
+                if coord not in all_data:
+                    all_data[coord] = {}
+                all_data[coord].update(data)
+        
+        return all_data
+    
     except Exception as e:
         print(f"Error in extract_s2_parameters: {e}")
-        raise Exception(f"Internal Server Error: {e}")  
+        raise Exception(f"Internal Server Error: {e}")
